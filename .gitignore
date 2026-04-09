@@ -1,0 +1,16 @@
+# Environment & secrets
+.env
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Audio output
+*.mp3
+*.wav
+
+# macOS
+.DS_Store
+
+# Whisper model cache
+__cache__/
