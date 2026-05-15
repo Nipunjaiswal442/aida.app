@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+*.mp3
+*.wav
+*.env
+.env
+/tmp/
+aida_response.mp3
+.DS_Store
+.cache/
