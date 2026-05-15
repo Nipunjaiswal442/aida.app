@@ -150,6 +150,82 @@ def take_screenshot() -> str:
     except Exception as e:
         return "Failed to take screenshot."
 
+
+# ── Calendar & Reminders (AppleScript) ─────────────
+
+def get_todays_events():
+    """Fetch today's calendar events via AppleScript."""
+    script = '''
+    tell application "Calendar"
+        set today to current date
+        set startOfDay to today - (time of today)
+        set endOfDay to startOfDay + 86399
+        set eventList to ""
+        repeat with c in every calendar
+            repeat with e in every event of c
+                if start date of e >= startOfDay and start date of e <= endOfDay then
+                    set eventList to eventList & summary of e & " at " & (start date of e as string) & linefeed
+                end if
+            end repeat
+        end repeat
+        if eventList is "" then
+            return "No events today."
+        else
+            return eventList
+        end if
+    end tell
+    '''
+    try:
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
+        return result.stdout.strip() or "Could not read calendar."
+    except Exception:
+        return "Could not read calendar."
+
+def add_reminder(title, notes=""):
+    """Add a reminder via AppleScript."""
+    # Escape quotes in title/notes for AppleScript safety
+    safe_title = title.replace('"', '\\"')
+    safe_notes = notes.replace('"', '\\"')
+    script = f'''
+    tell application "Reminders"
+        make new reminder with properties {{name:"{safe_title}", body:"{safe_notes}"}}
+    end tell
+    '''
+    try:
+        subprocess.run(["osascript", "-e", script], capture_output=True, timeout=10)
+        return f"Reminder '{title}' added."
+    except Exception:
+        return f"Could not add reminder '{title}'."
+
+
+# ── System Controls ────────────────────────────────
+
+def lock_screen():
+    """Lock the screen (display sleep)."""
+    subprocess.run(["pmset", "displaysleepnow"])
+    return "Screen locked."
+
+def empty_trash():
+    """Empty the Trash via AppleScript."""
+    try:
+        subprocess.run(["osascript", "-e", 'tell application "Finder" to empty trash'],
+                        capture_output=True, timeout=10)
+        return "Trash emptied."
+    except Exception:
+        return "Could not empty trash."
+
+def get_disk_usage():
+    """Get disk usage for the main volume."""
+    try:
+        result = subprocess.run(
+            "df -h / | tail -1 | awk '{print \"Used: \"$3\" / \"$2\" (\"$5\")\"}'",
+            shell=True, capture_output=True, text=True, timeout=10
+        )
+        return result.stdout.strip() or "Could not determine disk usage."
+    except Exception:
+        return "Could not determine disk usage."
+
+
 def web_search(query: str) -> str:
     try:
         res = requests.get(f"https://api.duckduckgo.com/?q={query}&format=json&no_html=1", timeout=5)

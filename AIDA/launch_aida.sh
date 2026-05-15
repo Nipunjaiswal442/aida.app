@@ -1,8 +1,9 @@
 #!/bin/bash
-# Start Ollama if not already running
-open -a Ollama
-sleep 4
+# Start Ollama silently as background daemon (no app window or menu bar icon)
+/usr/local/bin/ollama serve &>/dev/null &
+sleep 5
 
 # Launch AIDA
 cd /Users/apple/aida-assistant/AIDA
-/Users/apple/aida-assistant/AIDA/venv/bin/python3.12 main.py
+source venv/bin/activate
+python3 main.py

@@ -13,6 +13,7 @@ from workers.listen_worker import ListenWorker
 from workers.transcribe_worker import TranscribeWorker
 from workers.llm_worker import LLMWorker
 from workers.speak_worker import SpeakWorker
+from workers.wakeword_worker import WakeWordWorker
 
 class TalkButton(QPushButton):
     pressed_signal = pyqtSignal()
@@ -159,9 +160,59 @@ class MainWindow(QMainWindow):
         self.llm_worker = None
         self.speak_worker = None
         self.timer_alert_worker = None
+        self.wakeword_worker = None
 
         mac_tools.register_timer_callback(self.on_timer_alert)
 
+        # Start wake word listener
+        self._start_wakeword_listener()
+
+
+    def _start_wakeword_listener(self):
+        """Start the background wake word detection thread."""
+        self.wakeword_worker = WakeWordWorker()
+        self.wakeword_worker.wake_word_detected.connect(self.on_wake_word_detected)
+        self.wakeword_worker.error.connect(self.on_worker_error)
+        self.wakeword_worker.status_update.connect(self._on_wakeword_status)
+        self.wakeword_worker.start()
+
+    def _on_wakeword_status(self, status):
+        """Handle wake word status updates."""
+        print(status)
+
+    def on_wake_word_detected(self):
+        """Called when the wake word 'Hey AIDA' is detected."""
+        if self.current_state != "IDLE":
+            # Already busy, ignore wake word
+            if self.wakeword_worker:
+                self.wakeword_worker.resume()
+            return
+
+        # Speak acknowledgment, then start listening
+        self.set_state("SPEAKING")
+        self.speak_worker = SpeakWorker("Yes?")
+        self.speak_worker.speak_done.connect(self._on_wake_ack_done)
+        self.speak_worker.error.connect(self.on_worker_error)
+        self.speak_worker.start()
+
+    def _on_wake_ack_done(self):
+        """After saying 'Yes?', automatically start listening for the command."""
+        self.set_state("LISTENING")
+        self.listen_worker = ListenWorker()
+        self.listen_worker.volume_level.connect(self.waveform.update_levels)
+        self.listen_worker.audio_ready.connect(self.on_audio_ready)
+        self.listen_worker.start()
+        # Auto-stop listening after 8 seconds for wake word mode
+        from PyQt6.QtCore import QTimer
+        self._wake_listen_timer = QTimer()
+        self._wake_listen_timer.setSingleShot(True)
+        self._wake_listen_timer.timeout.connect(self._stop_wake_listening)
+        self._wake_listen_timer.start(8000)
+
+    def _stop_wake_listening(self):
+        """Auto-stop listening after timeout in wake word mode."""
+        if self.current_state == "LISTENING" and self.listen_worker:
+            self.listen_worker.stop()
 
     def trigger_startup_greeting(self):
         self.set_state("SPEAKING")
@@ -180,14 +231,23 @@ class MainWindow(QMainWindow):
         if state in ["PROCESSING", "SPEAKING"]:
             self.text_input.setEnabled(False)
             self.btn_send.setEnabled(False)
+            # Pause wake word during active interaction
+            if self.wakeword_worker:
+                self.wakeword_worker.pause()
         else:
             self.text_input.setEnabled(True)
             self.btn_send.setEnabled(True)
+            # Resume wake word when idle
+            if self.wakeword_worker:
+                self.wakeword_worker.resume()
 
     def start_listening(self):
         if self.current_state != "IDLE":
             return
         self.set_state("LISTENING")
+        # Pause wake word during manual listening
+        if self.wakeword_worker:
+            self.wakeword_worker.pause()
         self.listen_worker = ListenWorker()
         self.listen_worker.volume_level.connect(self.waveform.update_levels)
         self.listen_worker.audio_ready.connect(self.on_audio_ready)
@@ -284,6 +344,11 @@ class MainWindow(QMainWindow):
             
         event.ignore()
         self._is_closing = True
+
+        # Stop wake word listener
+        if self.wakeword_worker:
+            self.wakeword_worker.stop()
+
         self.set_state("SPEAKING")
         self.speak_worker = SpeakWorker("Goodbye! AIDA going offline.")
         self.speak_worker.speak_done.connect(self.final_close)
@@ -293,4 +358,6 @@ class MainWindow(QMainWindow):
     def final_close(self):
         if self.listen_worker:
             self.listen_worker.stop()
+        if self.wakeword_worker:
+            self.wakeword_worker.stop()
         self.close()

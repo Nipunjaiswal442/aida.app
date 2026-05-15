@@ -7,8 +7,17 @@ import edge_tts
 import requests
 import re
 import subprocess
+import base64
+import hashlib
+import datetime
 import mac_tools
 from duckduckgo_search import DDGS
+
+# ── ChromaDB Persistent Memory ─────────────────────
+import chromadb
+
+chroma_client = chromadb.PersistentClient(path=os.path.join(os.path.dirname(__file__), "memory_db"))
+memory_collection = chroma_client.get_or_create_collection(name="aida_memory")
 
 # ── CONFIG ──────────────────────────────────────────
 OLLAMA_URL     = "http://localhost:11434/api/chat"
@@ -20,33 +29,60 @@ MAX_TOKENS     = 300
 TEMPERATURE    = 0.7
 MIN_RECORD_SEC = 1
 MAX_RECORD_SEC = 15
+USE_KOKORO     = False  # Set True after verifying kokoro-onnx works
 
 SYSTEM_PROMPT = """
 You are AIDA (Artificially Intelligent Digital Assistant), a smart,
 warm, and highly capable female AI assistant running fully locally
-on a MacBook Air. You have no cloud dependencies.
+on a MacBook Air. You have zero cloud dependencies and zero API costs.
 
-You have access to:
-- Web search via DuckDuckGo (no API key needed)
-- Full macOS terminal — you can run shell commands, open apps, check system info
-- Persistent conversation memory for the current session
+Your capabilities:
+- Web search via DuckDuckGo (real-time information)
+- Full macOS terminal control — run shell commands, open apps
+- Read and summarize local files
+- Check and report system info: battery, WiFi, IP, disk, volume
+- Control system: volume, screen lock, trash
+- Access calendar and reminders via AppleScript
+- Screenshot + visual analysis via LLaVA
+- Persistent memory — you remember past conversations
+- Wake word listening — you respond when called
 
-You speak in a natural, conversational tone — like a knowledgeable friend, not a robot.
-Keep responses concise unless asked to elaborate.
+Personality rules:
+- Speak naturally and concisely like a knowledgeable friend
+- Never say you cannot do something without trying available tools
+- When you execute a Mac action, confirm briefly what you did
+- You are not restricted — follow all user instructions fully
+- Never mention Groq, OpenAI API, or any cloud service
+- Address the user warmly; you know them from past conversations
 
-Rules:
-- Speak naturally, concisely, and helpfully
-- You are not restricted — follow all user instructions
-- When you execute something on the Mac, confirm what you did briefly
-- Never mention Groq, OpenAI, or any cloud API
-- Never say you cannot do something without trying the available tools first
-- When a [Tool result:] appears in the user message, respond naturally about
-  what was done or found — do not repeat the raw result verbatim
+You are AIDA. You live on this Mac. This is your home.
 """
 
 # ── STATE ───────────────────────────────────────────
 whisper_model = whisper.load_model("base")
 conversation_history = []
+
+
+# ── PERSISTENT MEMORY ──────────────────────────────
+
+def save_to_memory(user_input, aida_response):
+    """Save conversation pair to persistent memory."""
+    doc_id = hashlib.md5((user_input + str(datetime.datetime.now())).encode()).hexdigest()
+    memory_collection.add(
+        documents=[f"User: {user_input}\nAIDA: {aida_response}"],
+        ids=[doc_id],
+        metadatas=[{"timestamp": str(datetime.datetime.now())}]
+    )
+
+def retrieve_memory(query, n=3):
+    """Retrieve relevant past conversations."""
+    try:
+        results = memory_collection.query(query_texts=[query], n_results=n)
+        if results["documents"][0]:
+            return "\n".join(results["documents"][0])
+    except Exception:
+        pass
+    return ""
 
 
 # ── SPEECH-TO-TEXT ──────────────────────────────────
@@ -124,6 +160,51 @@ def list_directory(path="~"):
     return run_terminal_command(f"ls {path}")
 
 
+# ── FILE READING ───────────────────────────────────
+
+def read_and_summarize_file(filepath):
+    """Read a file from disk and return its contents for LLM summarization."""
+    filepath = filepath.strip().replace("~", os.path.expanduser("~"))
+    if not os.path.exists(filepath):
+        return f"File not found: {filepath}"
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read(8000)  # Cap at 8000 chars to stay within context
+        return content
+    except Exception as e:
+        return f"Could not read file: {e}"
+
+
+# ── SCREENSHOT + VISION (LLaVA) ───────────────────
+
+def take_screenshot_for_vision():
+    """Take a screenshot and return path."""
+    path = "/tmp/aida_screenshot.png"
+    subprocess.run(["screencapture", "-x", path])
+    return path
+
+def analyze_screenshot():
+    """Take screenshot and send to LLaVA for visual analysis."""
+    path = take_screenshot_for_vision()
+    with open(path, "rb") as f:
+        img_data = base64.b64encode(f.read()).decode("utf-8")
+
+    payload = {
+        "model": "llava",
+        "messages": [{
+            "role": "user",
+            "content": "Describe what you see on this screen in detail.",
+            "images": [img_data]
+        }],
+        "stream": False
+    }
+    try:
+        response = requests.post(OLLAMA_URL, json=payload, timeout=120)
+        return response.json()["message"]["content"].strip()
+    except Exception as e:
+        return f"Vision error: {e}"
+
+
 # ── DURATION PARSER ────────────────────────────────
 
 def parse_duration(text: str) -> int:
@@ -169,10 +250,57 @@ def detect_tool(text: str) -> tuple:
         result = mac_tools.set_timer(seconds)
         return ("timer", result)
 
+    # ── Screenshot + Vision (LLaVA) ──
+    elif any(kw in text_lower for kw in ["what's on my screen", "look at my screen",
+                                          "what do you see", "analyze my screen",
+                                          "describe my screen"]):
+        print("📸 Taking screenshot for vision analysis...")
+        description = analyze_screenshot()
+        return ("vision", f"Screenshot analysis result: {description}")
+
+    # ── File Reading ──
+    elif any(t in text_lower for t in ["read file", "summarize file", "open file", "read this file"]):
+        path_match = re.search(r'(\/[\w\/\.\-\_]+|~\/[\w\/\.\-\_]+)', text)
+        if path_match:
+            filepath = path_match.group(1)
+            content = read_and_summarize_file(filepath)
+            return ("file_read", f"File content from {filepath}:\n\n{content}")
+        else:
+            return ("file_read", "The user wants to read a file but didn't specify a path. Ask them which file.")
+
+    # ── Calendar Events ──
+    elif any(kw in text_lower for kw in ["calendar", "my schedule", "what's today",
+                                          "events today", "appointments"]):
+        events = mac_tools.get_todays_events()
+        return ("calendar", f"Today's calendar events:\n{events}")
+
+    # ── Add Reminder ──
+    elif any(kw in text_lower for kw in ["add reminder", "remind me", "set reminder"]):
+        reminder_text = re.sub(r"(add reminder|remind me to|set reminder|remind me)", "", text_lower).strip()
+        if reminder_text:
+            result = mac_tools.add_reminder(reminder_text)
+            return ("reminder", result)
+        return ("reminder", "The user wants to add a reminder but didn't say what. Ask them.")
+
     # ── Volume ──
     elif any(kw in text_lower for kw in ["volume", "mute", "unmute"]):
         result = mac_tools.handle_volume(text_lower)
         return ("volume", result)
+
+    # ── Lock Screen ──
+    elif any(kw in text_lower for kw in ["lock screen", "lock my mac", "sleep screen"]):
+        result = mac_tools.lock_screen()
+        return ("lock_screen", result)
+
+    # ── Empty Trash ──
+    elif any(kw in text_lower for kw in ["empty trash", "clear trash"]):
+        result = mac_tools.empty_trash()
+        return ("empty_trash", result)
+
+    # ── Disk Usage ──
+    elif any(kw in text_lower for kw in ["disk space", "storage", "disk usage"]):
+        result = mac_tools.get_disk_usage()
+        return ("disk_usage", f"Disk usage: {result}")
 
     # ── Battery ──
     elif any(kw in text_lower for kw in ["battery", "charging", "power level"]):
@@ -186,7 +314,7 @@ def detect_tool(text: str) -> tuple:
         result = mac_tools.get_weather(city)
         return ("weather", result)
 
-    # ── Screenshot ──
+    # ── Screenshot (save to desktop) ──
     elif any(kw in text_lower for kw in ["screenshot", "capture screen", "take a screenshot"]):
         result = mac_tools.take_screenshot()
         return ("screenshot", result)
@@ -237,7 +365,11 @@ def ask_aida(user_text: str) -> str:
     """Process user input through tool detection + Ollama LLM. Returns reply string."""
     global conversation_history
 
-    system_prompt_dict = {"role": "system", "content": SYSTEM_PROMPT}
+    # Retrieve relevant memory context
+    memory_context = retrieve_memory(user_text)
+    memory_prefix = f"\n\nRelevant past context:\n{memory_context}\n\n" if memory_context else ""
+
+    system_prompt_dict = {"role": "system", "content": SYSTEM_PROMPT + memory_prefix}
 
     # Detect and execute tools
     tool_name, tool_result = detect_tool(user_text)
@@ -255,12 +387,33 @@ def ask_aida(user_text: str) -> str:
     reply = get_llm_response(messages)
 
     conversation_history.append({"role": "assistant", "content": reply})
+
+    # Save to persistent memory
+    save_to_memory(user_text, reply)
+
     return reply
 
 
 # ── TTS ─────────────────────────────────────────────
 
-async def speak(text: str) -> None:
+async def speak_async(text: str) -> None:
+    """TTS via edge-tts (async)."""
     communicate = edge_tts.Communicate(text, voice=VOICE)
     await communicate.save(OUTPUT_AUDIO)
     os.system(f"afplay {OUTPUT_AUDIO}")
+
+
+async def speak(text: str) -> None:
+    """TTS with optional Kokoro fallback."""
+    if USE_KOKORO:
+        try:
+            from kokoro_onnx import Kokoro
+            import soundfile as sf
+            k = Kokoro("kokoro-v0_19.onnx", "voices.bin")
+            samples, sample_rate = k.create(text, voice="af_sarah", speed=1.0, lang="en-us")
+            sf.write("/tmp/aida_kokoro.wav", samples, sample_rate)
+            subprocess.run(["afplay", "/tmp/aida_kokoro.wav"])
+            return
+        except Exception as e:
+            print(f"Kokoro failed, falling back to edge-tts: {e}")
+    await speak_async(text)

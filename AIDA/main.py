@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings("ignore")
+
 import sys
 import os
 from PyQt6.QtWidgets import QApplication
