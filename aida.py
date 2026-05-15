@@ -1,7 +1,6 @@
-import ssl
-ssl._create_default_https_context = ssl._create_unverified_context
 import os
 import sys
+import time
 import asyncio
 import tempfile
 import sounddevice as sd
@@ -11,132 +10,156 @@ import whisper
 import edge_tts
 from groq import Groq
 
-# ─────────────────────────────────────────────
-#  CONFIG
-# ─────────────────────────────────────────────
+from config import (
+    VOICE,
+    SAMPLE_RATE,
+    RECORD_SECONDS,
+    OUTPUT_AUDIO,
+    WHISPER_MODEL,
+    GROQ_MODEL,
+    MAX_TOKENS,
+    TEMPERATURE,
+    ASSISTANT_NAME,
+)
+
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-VOICE = "en-US-JennyNeural"          # Female voice for AIDA
-SAMPLE_RATE = 16000
-RECORD_SECONDS = 5                   # How long to listen each time
-OUTPUT_AUDIO = "aida_response.mp3"
-
 SYSTEM_PROMPT = """
-You are AIDA (Artificially Intelligent Digital Assistant), a smart, 
-warm, and helpful female AI assistant. You speak in a natural, 
-conversational tone — like a knowledgeable friend, not a robot.
-Keep responses concise unless asked to elaborate.
+You are AIDA (Artificially Intelligent Digital Assistant), a smart, warm, and helpful female AI assistant.
+You speak in a natural, conversational tone — like a knowledgeable friend, not a robot.
+Keep responses concise unless the user asks you to elaborate.
 You address the user by name if they tell you it.
+You are running on a macOS laptop and are powered by LLaMA 3.1 via Groq.
 """
+EXIT_COMMANDS = ["goodbye", "exit", "quit", "bye", "shut down", "stop"]
 
-# ─────────────────────────────────────────────
-#  INIT
-# ─────────────────────────────────────────────
-client = Groq(api_key=GROQ_API_KEY)
-whisper_model = whisper.load_model("base")   # Downloads ~140MB once
-conversation_history = []
+whisper_model = None
+client = None
+conversation_history: list[dict[str, str]] = []
 
-# ─────────────────────────────────────────────
-#  STEP A: RECORD AUDIO FROM MIC
-# ─────────────────────────────────────────────
-def record_audio(duration=RECORD_SECONDS):
-    print(f"\n🎙️  Listening for {duration} seconds... (speak now)")
-    audio = sd.rec(
-        int(duration * SAMPLE_RATE),
-        samplerate=SAMPLE_RATE,
-        channels=1,
-        dtype='int16'
-    )
-    sd.wait()
-    print("✅  Done recording.")
-    return audio
 
-# ─────────────────────────────────────────────
-#  STEP B: TRANSCRIBE AUDIO → TEXT (Whisper)
-# ─────────────────────────────────────────────
-def transcribe(audio_data):
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        write(f.name, SAMPLE_RATE, audio_data)
-        result = whisper_model.transcribe(f.name)
-    text = result["text"].strip()
-    print(f"🗣️  You said: {text}")
-    return text
+def record_audio(duration=RECORD_SECONDS) -> np.ndarray:
+    try:
+        total_frames = int(duration * SAMPLE_RATE)
+        audio_data = sd.rec(
+            total_frames,
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype="int16",
+        )
+        for remaining in range(int(duration), 0, -1):
+            print(
+                f"\r🎙  Listening for {remaining} seconds... (speak now)",
+                end="",
+                flush=True,
+            )
+            time.sleep(1)
+        sd.wait()
+        print()
+        print("✅  Done recording.")
+        return audio_data
+    except Exception as exc:
+        print(f"❌  Error: Unable to access the microphone. {exc}")
+        print("❌  Allow microphone access in System Settings > Privacy & Security > Microphone > Terminal")
+        sys.exit(1)
 
-# ─────────────────────────────────────────────
-#  STEP C: GET RESPONSE FROM GROQ (LLM)
-# ─────────────────────────────────────────────
-def ask_aida(user_input):
-    conversation_history.append({
-        "role": "user",
-        "content": user_input
-    })
 
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",   # Fast + free on Groq
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            *conversation_history
-        ],
-        max_tokens=300,
-        temperature=0.7
-    )
+def transcribe(audio_data: np.ndarray) -> str:
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
+        temp_path = temp_audio.name
 
-    reply = response.choices[0].message.content.strip()
+    try:
+        write(temp_path, SAMPLE_RATE, audio_data)
+        result = whisper_model.transcribe(temp_path)
+        text = result["text"].strip()
+        print(f"🗣  You said: {text}")
+        return text
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
-    conversation_history.append({
-        "role": "assistant",
-        "content": reply
-    })
 
-    print(f"🤖  AIDA: {reply}")
-    return reply
+def ask_aida(user_input: str) -> str:
+    conversation_history.append({"role": "user", "content": user_input})
 
-# ─────────────────────────────────────────────
-#  STEP D: SPEAK THE RESPONSE (edge-tts)
-# ─────────────────────────────────────────────
-async def speak(text):
-    tts = edge_tts.Communicate(text, voice=VOICE)
-    await tts.save(OUTPUT_AUDIO)
-    os.system(f"afplay {OUTPUT_AUDIO}")   # afplay is built into macOS
+    try:
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                *conversation_history,
+            ],
+            max_tokens=MAX_TOKENS,
+            temperature=TEMPERATURE,
+        )
+        reply = response.choices[0].message.content.strip()
+        conversation_history.append({"role": "assistant", "content": reply})
+        print(f"🤖  {ASSISTANT_NAME}: {reply}")
+        return reply
+    except Exception as exc:
+        conversation_history.pop()
+        print(f"❌  Error: API call failed — retrying... ({exc})")
+        return ""
 
-# ─────────────────────────────────────────────
-#  MAIN LOOP
-# ─────────────────────────────────────────────
-def main():
-    print("=" * 45)
-    print("       👋  AIDA is Online. How can I help?")
-    print("       (say 'goodbye' or 'exit' to quit)")
-    print("=" * 45)
 
-    # Greet on startup
-    greeting = "Hello! I'm AIDA, your personal assistant. I'm ready when you are."
-    print(f"🤖  AIDA: {greeting}")
+async def speak(text: str) -> None:
+    try:
+        communicate = edge_tts.Communicate(text, voice=VOICE)
+        await communicate.save(OUTPUT_AUDIO)
+        os.system(f"afplay {OUTPUT_AUDIO}")
+    except Exception as exc:
+        print(f"❌  Error: Voice synthesis failed — continuing without audio. ({exc})")
+
+
+def main() -> None:
+    global GROQ_API_KEY, whisper_model, client, conversation_history
+
+    GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+    if not GROQ_API_KEY:
+        print("❌  Error: GROQ_API_KEY is not set. Export it in ~/.zshrc and try again.")
+        sys.exit(1)
+
+    print("=============================================")
+    print(f"👋  {ASSISTANT_NAME} is Online. How can I help?")
+    print("(say 'goodbye' or 'exit' to quit)")
+    print("=============================================")
+
+    try:
+        whisper_model = whisper.load_model(WHISPER_MODEL)
+    except Exception as exc:
+        print(f"❌  Error: Unable to load Whisper model '{WHISPER_MODEL}'. Check your internet connection for the first download. ({exc})")
+        sys.exit(1)
+
+    client = Groq(api_key=GROQ_API_KEY)
+    conversation_history = []
+
+    greeting = "Hello! I am AIDA. How can I help you today?"
     asyncio.run(speak(greeting))
 
-    while True:
-        try:
-            audio = record_audio()
-            user_text = transcribe(audio)
+    try:
+        while True:
+            try:
+                audio_data = record_audio()
+                user_text = transcribe(audio_data)
 
-            if not user_text:
+                if not user_text.strip():
+                    print("❌  Error: No speech detected — listening again...")
+                    continue
+
+                if any(word in user_text.lower() for word in EXIT_COMMANDS):
+                    farewell = "Goodbye! It was a pleasure assisting you."
+                    asyncio.run(speak(farewell))
+                    sys.exit(0)
+
+                reply = ask_aida(user_text)
+                if reply:
+                    asyncio.run(speak(reply))
+            except Exception as exc:
+                print(f"❌  Error: {exc} — continuing...")
                 continue
+    except KeyboardInterrupt:
+        print("\n⛔  AIDA shut down manually.")
+        sys.exit(0)
 
-            # Exit commands
-            if any(word in user_text.lower() for word in ["goodbye", "exit", "quit", "bye"]):
-                farewell = "Goodbye! It was a pleasure assisting you."
-                print(f"🤖  AIDA: {farewell}")
-                asyncio.run(speak(farewell))
-                break
-
-            response = ask_aida(user_text)
-            asyncio.run(speak(response))
-
-        except KeyboardInterrupt:
-            print("\n\n⛔  AIDA shut down manually.")
-            break
-        except Exception as e:
-            print(f"❌  Error: {e}")
-            continue
 
 if __name__ == "__main__":
     main()
-

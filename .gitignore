@@ -13,4 +13,4 @@ __pycache__/
 .DS_Store
 
 # Whisper model cache
-__cache__/
+.cache/

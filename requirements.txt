@@ -1,0 +1,7 @@
+groq
+openai-whisper
+sounddevice
+numpy
+scipy
+edge-tts
+pyaudio
