@@ -105,6 +105,36 @@ python3 main.py
 | "What's my disk usage?" | Reports storage stats |
 | "Run command git status" | Executes in shell, speaks output |
 
+## System Architecture
+
+```mermaid
+graph TD
+    User([👤 User]) --> |"Hey AIDA" (Audio)| WakeWord[openWakeWord Worker]
+    WakeWord --> |Triggers| Mic[PyAudio Recording Worker]
+    User --> |Text Input / GUI| GUI[PyQt6 MainWindow]
+    
+    Mic --> |Raw Audio| STT[Whisper STT Local]
+    STT --> |Transcribed Text| IntentRouter{Intent Router}
+    GUI --> |Text| IntentRouter
+    
+    IntentRouter --> |Tool Requests| MacTools[mac_tools.py]
+    IntentRouter --> |Search Requests| WebSearch[DuckDuckGo Search]
+    IntentRouter --> |Vision Requests| LLaVA[LLaVA Vision Model]
+    IntentRouter --> |History Query| Memory[(ChromaDB Persistent Memory)]
+    
+    MacTools --> |Output| Core[aida_core.py]
+    WebSearch --> |Results| Core
+    LLaVA --> |Description| Core
+    Memory --> |Past Context| Core
+    
+    Core --> |Context + Prompt| LLM[Ollama + dolphin-mistral]
+    LLM --> |Response| TTS[edge-tts / Kokoro ONNX]
+    LLM --> |Save History| Memory
+    
+    TTS --> |Spoken Audio| User
+    LLM --> |Text Display| GUI
+```
+
 ---
 
 ## Project Structure
