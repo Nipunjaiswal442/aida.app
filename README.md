@@ -1,107 +1,193 @@
-# 🤖 AIDA
+# 🤖 AIDA — Artificially Intelligent Digital Assistant
 
-A voice-activated AI assistant for macOS that listens, transcribes locally, thinks with Groq, and speaks back in a natural voice.
+> Fully local, voice-controlled AI assistant for macOS.
+> Zero cloud. Zero API keys. Zero cost. Runs entirely on your Mac.
 
-## Features
+---
 
-- Voice-first assistant loop in the terminal
-- Local speech-to-text using OpenAI Whisper
-- Fast LLaMA 3.1 responses through the Groq API
-- Natural female voice responses with `edge-tts`
-- Session-based conversation memory for follow-up questions
-- Graceful voice shutdown with commands like `goodbye` and `exit`
-- Customizable voice, model, and timing through `config.py`
+## What AIDA Can Do
+
+| Capability | Detail |
+|---|---|
+| 🎙️ Wake Word | Say "Hey AIDA" to activate (openWakeWord) |
+| 🧠 AI Brain | Dolphin Mistral via Ollama — 100% local |
+| 👁️ Vision | Screenshot analysis via LLaVA (local) |
+| 🔍 Web Search | DuckDuckGo — no API key needed |
+| 🗓️ Calendar | Read today's events, add reminders via AppleScript |
+| 💻 Mac Control | Open apps, terminal commands, volume, lock screen, trash |
+| 📁 File Reading | Read and summarize any file on disk |
+| 🧠 Persistent Memory | Remembers past conversations via ChromaDB |
+| 🔒 Privacy | Zero data leaves your machine — ever |
+
+---
 
 ## Tech Stack
 
-| Component | Tool | Purpose | Cost |
-| --- | --- | --- | --- |
-| LLM (Brain) | Groq API (`llama-3.1-8b-instant`) | AI understanding and responses | Free |
-| Speech-to-Text | OpenAI Whisper (`base`) | Microphone audio to text | Free |
-| Text-to-Speech | `edge-tts` | Response text to natural female voice | Free |
-| Audio Recording | `sounddevice` | Capture microphone input | Free |
-| Audio Playback | `afplay` | Play generated `.mp3` audio on macOS | Free |
-| Audio File I/O | `scipy` | Save `.wav` files for transcription | Free |
-| Array Processing | `numpy` | Handle audio buffers | Free |
+| Component | Tool | Cost |
+|---|---|---|
+| LLM | Ollama + dolphin-mistral | Free |
+| Vision LLM | Ollama + LLaVA | Free |
+| Wake Word | openWakeWord (hey_jarvis model) | Free |
+| STT | OpenAI Whisper base (local) | Free |
+| TTS | edge-tts / Kokoro ONNX | Free |
+| Search | duckduckgo-search | Free |
+| Memory | ChromaDB (local persistent) | Free |
+| Mac Control | AppleScript + subprocess | Free |
+| Launch | macOS Automator | Free |
 
-## Prerequisites
+---
 
-- macOS
-- Python 3.9+
-- Free Groq API key
+## Setup
 
-## Installation
-
-1. Install system dependencies.
+### Prerequisites
 
 ```bash
 brew install portaudio ffmpeg
+brew install ollama
+ollama pull dolphin-mistral
+ollama pull llava
 ```
 
-2. Create and activate a virtual environment.
+### Install
 
 ```bash
-cd AIDA
+git clone https://github.com/Nipunjaiswal442/aida.app.git
+cd aida.app/AIDA
 python3 -m venv venv
 source venv/bin/activate
-```
-
-3. Install Python packages.
-
-```bash
 pip install -r requirements.txt
 ```
 
-## API Key Setup
-
-Add your Groq API key to `~/.zshrc`:
+### Run
 
 ```bash
-echo 'export GROQ_API_KEY="paste_your_key_here"' >> ~/.zshrc
-source ~/.zshrc
-echo $GROQ_API_KEY
+# Ollama starts silently in background automatically via Automator
+# Or manually:
+ollama serve &>/dev/null &
+sleep 3
+python3 main.py
 ```
 
-## Running AIDA
+---
+
+## Automator Setup (One-Click Launch, No Ollama Window)
+
+1. Open Automator → New → Application
+2. Add Run Shell Script action
+3. Paste:
 
 ```bash
-python aida.py
+#!/bin/bash
+/usr/local/bin/ollama serve &>/dev/null &
+sleep 5
+cd /Users/apple/aida-assistant/AIDA
+source venv/bin/activate
+python3 main.py
 ```
 
-## Voice Customization
+4. Save as AIDA.app → add to Dock
 
-| Voice ID | Accent | Tone | Best For |
-| --- | --- | --- | --- |
-| `en-US-JennyNeural` | American English | Warm, professional | Default general use |
-| `en-US-AriaNeural` | American English | Clear, friendly | Conversational use |
-| `en-GB-SoniaNeural` | British English | Formal, articulate | Professional contexts |
-| `en-IN-NeerjaNeural` | Indian English | Natural, warm | India-localized feel |
+---
 
-## Configuration
+## Example Commands
 
-All user-configurable values live in `config.py`. You can change the voice, recording duration, Whisper model, Groq model, output audio file name, response length, and assistant name without editing `aida.py`.
+| You say | AIDA does |
+|---|---|
+| "Hey AIDA" | Wakes up, says "Yes?" |
+| "Search for latest AI news" | DuckDuckGo → summarizes results |
+| "What's on my screen?" | Screenshots → LLaVA describes it |
+| "What's on my calendar today?" | Reads Calendar.app via AppleScript |
+| "Remind me to call mom" | Adds to Reminders.app |
+| "Set volume to 40" | Sets system volume |
+| "Read file ~/Documents/notes.txt" | Reads and summarizes the file |
+| "Open Spotify" | Launches the app |
+| "Lock my screen" | Runs displaysleepnow |
+| "What's my disk usage?" | Reports storage stats |
+| "Run command git status" | Executes in shell, speaks output |
 
-## Troubleshooting
+## System Architecture
 
-1. Microphone access fails.
-   Fix: Open `System Settings > Privacy & Security > Microphone > Terminal` and enable access.
-2. Whisper does not load on first run.
-   Fix: Check your internet connection once so Whisper can download the `base` model cache.
-3. AIDA starts but Groq replies fail.
-   Fix: Verify `echo $GROQ_API_KEY` prints your key and restart the terminal session.
+```mermaid
+graph TD
+    User([👤 User]) --> |"Hey AIDA" (Audio)| WakeWord[openWakeWord Worker]
+    WakeWord --> |Triggers| Mic[PyAudio Recording Worker]
+    User --> |Text Input / GUI| GUI[PyQt6 MainWindow]
+    
+    Mic --> |Raw Audio| STT[Whisper STT Local]
+    STT --> |Transcribed Text| IntentRouter{Intent Router}
+    GUI --> |Text| IntentRouter
+    
+    IntentRouter --> |Tool Requests| MacTools[mac_tools.py]
+    IntentRouter --> |Search Requests| WebSearch[DuckDuckGo Search]
+    IntentRouter --> |Vision Requests| LLaVA[LLaVA Vision Model]
+    IntentRouter --> |History Query| Memory[(ChromaDB Persistent Memory)]
+    
+    MacTools --> |Output| Core[aida_core.py]
+    WebSearch --> |Results| Core
+    LLaVA --> |Description| Core
+    Memory --> |Past Context| Core
+    
+    Core --> |Context + Prompt| LLM[Ollama + dolphin-mistral]
+    LLM --> |Response| TTS[edge-tts / Kokoro ONNX]
+    LLM --> |Save History| Memory
+    
+    TTS --> |Spoken Audio| User
+    LLM --> |Text Display| GUI
+```
+
+---
+
+## Project Structure
+
+```
+AIDA/
+├── main.py              # Entry point — launches PyQt6 GUI
+├── aida_core.py         # LLM, STT, TTS, memory, tools, routing
+├── mac_tools.py         # macOS system tools (volume, calendar, etc.)
+├── ui/                  # PyQt6 GUI components
+│   ├── main_window.py   # Main window with wake word integration
+│   ├── orb_widget.py    # Animated orb visualization
+│   ├── waveform_widget.py # Audio waveform display
+│   ├── hud_status_widget.py # Status HUD
+│   └── chat_log_widget.py   # Chat history
+├── workers/             # QThread background workers
+│   ├── listen_worker.py     # Audio recording
+│   ├── transcribe_worker.py # Whisper STT
+│   ├── llm_worker.py        # Ollama LLM calls
+│   ├── speak_worker.py      # TTS playback
+│   └── wakeword_worker.py   # Wake word detection
+├── requirements.txt     # Python dependencies
+├── launch_aida.sh       # Silent Ollama + AIDA launcher
+├── memory_db/           # ChromaDB persistent memory (auto-created)
+└── README.md
+```
+
+---
+
+## Built By
+
+**Nipun Jaiswal** — VIT-AP University, CSE
+- GitHub: [@Nipunjaiswal442](https://github.com/Nipunjaiswal442)
+
+Scaffolded with [Claude](https://claude.ai) and [Antigravity](https://antigravity.dev).
+
+---
 
 ## Roadmap
 
-- [ ] Wake word support like "Hey AIDA"
-- [ ] Web search for current information
-- [ ] Voice-based app control on macOS
-- [ ] Session memory across restarts
-- [ ] GUI with waveform and chat history
-- [ ] Context trimming for long conversations
+- [x] Local LLM via Ollama
+- [x] Web search (DuckDuckGo)
+- [x] Mac terminal control
+- [x] Wake word detection
+- [x] Persistent memory (ChromaDB)
+- [x] Screenshot + vision (LLaVA)
+- [x] Calendar + reminders
+- [x] System control (volume, lock, trash)
+- [ ] Spotify / music control via AppleScript
+- [ ] Custom wake word training
+- [ ] Faster TTS with Kokoro ONNX
+- [ ] Notification center integration
 
-## Author
+---
 
-- GitHub: [Nipun Jaiswal](https://github.com/Nipunjaiswal442)
-- LinkedIn: [Nipun Jaiswal](https://www.linkedin.com/)
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+MIT License
