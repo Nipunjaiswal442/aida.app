@@ -1,5 +1,6 @@
 from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QApplication, QLineEdit, QMessageBox
 import mac_tools
+from aida_core import is_datetime_request
 from terminal_brain import (
     format_recent_history,
     is_terminal_history_request,
@@ -303,6 +304,10 @@ class MainWindow(QMainWindow):
 
     def dispatch_user_text(self, text):
         """Route user text to fast local handlers, terminal flow, or the LLM."""
+        if is_datetime_request(text):
+            self.on_reply_ready(mac_tools.get_datetime())
+            return
+
         if is_terminal_history_request(text):
             self.on_reply_ready(format_recent_history())
             return

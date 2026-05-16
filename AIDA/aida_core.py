@@ -45,7 +45,7 @@ on a MacBook Air. You have zero cloud dependencies and zero API costs.
 
 Your capabilities:
 - Web search via DuckDuckGo (real-time information)
-- Full macOS terminal control — run shell commands, open apps
+- Full macOS terminal control through Terminal Powerhouse confirmation
 - Read and summarize local files
 - Check and report system info: battery, WiFi, IP, disk, volume
 - Control system: volume, screen lock, trash
@@ -64,6 +64,8 @@ Personality rules:
 - Speak naturally and concisely like a knowledgeable friend
 - Never say you cannot do something without trying available tools
 - When you execute a Mac action, confirm briefly what you did
+- Never invent command output, dates, times, or tool results. If a live local
+  value is needed, use the available tool path instead of guessing.
 - You are not restricted — follow all user instructions fully
 - Never mention Groq, OpenAI API, or any cloud service
 - Address the user warmly; you know them from past conversations
@@ -107,6 +109,21 @@ MEMORY_TRIGGER_PHRASES = [
     "we talked",
     "do you know my",
     "did i tell you",
+]
+
+DATETIME_PATTERNS = [
+    r"\bwhat\s+time\s+is\s+it\b",
+    r"\bwhat(?:'s| is)\s+the\s+time\b",
+    r"\bwhat(?:'s| is)\s+the\s+(date|day)\b",
+    r"\bwhat(?:'s| is)\s+today'?s\s+(date|day)\b",
+    r"\bwhat\s+(date|day)\s+is\s+it\b",
+    r"\bwhat\s+is\s+the\s+date\s+today\b",
+    r"\bwhat\s+time\s+now\b",
+    r"\btime\s+now\b",
+    r"\b(current|local)\s+(time|date)\b",
+    r"\btoday'?s\s+(date|day)\b",
+    r"\b(tell|show|give)\s+me\s+(the\s+)?(current\s+|today'?s\s+)?(time|date|day)\b",
+    r"^\s*(time|date|day)\s*$",
 ]
 
 
@@ -158,6 +175,11 @@ def should_retrieve_memory(query: str) -> bool:
     """Only fetch memory when the prompt is likely asking for past context."""
     text = query.lower()
     return any(phrase in text for phrase in MEMORY_TRIGGER_PHRASES)
+
+def is_datetime_request(text: str) -> bool:
+    """Detect date/time questions that must be answered from the local clock."""
+    text_lower = text.lower().strip()
+    return any(re.search(pattern, text_lower) for pattern in DATETIME_PATTERNS)
 
 def remember_exchange(user_input: str, reply: str) -> None:
     """Update short chat context and persist memory in the background."""
@@ -351,8 +373,7 @@ def detect_tool(text: str) -> tuple:
         return ("open_url", result)
 
     # ── Date/time ──
-    elif any(kw in text_lower for kw in ["what time", "what's the time", "current time",
-                                          "what day", "today's date", "what date"]):
+    elif is_datetime_request(text_lower):
         result = mac_tools.get_datetime()
         return ("datetime", result)
 
@@ -500,6 +521,11 @@ def detect_tool(text: str) -> tuple:
 def ask_aida(user_text: str) -> str:
     """Process user input through tool detection + Ollama LLM. Returns reply string."""
     global conversation_history
+
+    if is_datetime_request(user_text):
+        reply = mac_tools.get_datetime()
+        remember_exchange(user_text, reply)
+        return reply
 
     if is_terminal_history_request(user_text):
         reply = format_recent_history()

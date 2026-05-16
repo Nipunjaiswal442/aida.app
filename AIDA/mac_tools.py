@@ -44,8 +44,9 @@ def open_app(app_name: str) -> str:
         return f"Could not find app: {normalized_name}. Error: {str(e)}"
 
 def get_datetime() -> str:
-    now = datetime.datetime.now()
-    return f"Current date and time: {now.strftime('%A, %d %B %Y, %I:%M %p')}"
+    now = datetime.datetime.now().astimezone()
+    timezone = now.tzname() or now.strftime("%z")
+    return f"Current date and time: {now.strftime('%A, %d %B %Y, %I:%M %p')} {timezone}"
 
 def set_timer(seconds: int) -> str:
     def fire():
@@ -275,4 +276,3 @@ def send_notification(message: str, title: str = "AIDA") -> str:
         return "Notification sent."
     except Exception:
         return "Failed to send notification."
-
