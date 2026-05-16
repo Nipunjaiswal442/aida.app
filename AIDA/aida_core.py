@@ -29,7 +29,7 @@ MAX_TOKENS     = 300
 TEMPERATURE    = 0.7
 MIN_RECORD_SEC = 1
 MAX_RECORD_SEC = 15
-USE_KOKORO     = False  # Set True after verifying kokoro-onnx works
+USE_KOKORO     = True  # Use the blazing fast local Kokoro v1.0 TTS
 
 SYSTEM_PROMPT = """
 You are AIDA (Artificially Intelligent Digital Assistant), a smart,
@@ -282,6 +282,30 @@ def detect_tool(text: str) -> tuple:
             return ("reminder", result)
         return ("reminder", "The user wants to add a reminder but didn't say what. Ask them.")
 
+    # ── Spotify / Music Control ──
+    elif any(kw in text_lower for kw in ["play spotify", "pause music", "pause spotify", "next song", "next track", "previous track", "previous song"]):
+        if "play" in text_lower:
+            cmd = "play"
+        elif "pause" in text_lower or "stop" in text_lower:
+            cmd = "pause"
+        elif "next" in text_lower:
+            cmd = "next track"
+        elif "previous" in text_lower or "back" in text_lower:
+            cmd = "previous track"
+        else:
+            cmd = "play"
+            
+        result = mac_tools.control_spotify(cmd)
+        return ("spotify", result)
+
+    # ── Notification Center ──
+    elif any(kw in text_lower for kw in ["send notification", "notify me", "show notification"]):
+        msg = re.sub(r"(send notification|notify me|show notification that|show notification|notify me that)\s*", "", text_lower).strip()
+        if msg:
+            result = mac_tools.send_notification(msg)
+            return ("notification", result)
+        return ("notification", "User wanted to send a notification but didn't specify a message.")
+
     # ── Volume ──
     elif any(kw in text_lower for kw in ["volume", "mute", "unmute"]):
         result = mac_tools.handle_volume(text_lower)
@@ -409,7 +433,8 @@ async def speak(text: str) -> None:
         try:
             from kokoro_onnx import Kokoro
             import soundfile as sf
-            k = Kokoro("kokoro-v0_19.onnx", "voices.bin")
+            # Use Kokoro v1.0 models downloaded directly
+            k = Kokoro("kokoro-v1.0.onnx", "voices-v1.0.bin")
             samples, sample_rate = k.create(text, voice="af_sarah", speed=1.0, lang="en-us")
             sf.write("/tmp/aida_kokoro.wav", samples, sample_rate)
             subprocess.run(["afplay", "/tmp/aida_kokoro.wav"])

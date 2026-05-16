@@ -159,6 +159,7 @@ AIDA/
 ├── requirements.txt     # Python dependencies
 ├── launch_aida.sh       # Silent Ollama + AIDA launcher
 ├── memory_db/           # ChromaDB persistent memory (auto-created)
+├── wakeword_training.md # Guide to custom wake word training
 └── README.md
 ```
 
@@ -183,10 +184,10 @@ Scaffolded with [Claude](https://claude.ai) and [Antigravity](https://antigravit
 - [x] Screenshot + vision (LLaVA)
 - [x] Calendar + reminders
 - [x] System control (volume, lock, trash)
-- [ ] Spotify / music control via AppleScript
-- [ ] Custom wake word training
-- [ ] Faster TTS with Kokoro ONNX
-- [ ] Notification center integration
+- [x] Spotify / music control via AppleScript
+- [x] Custom wake word training (see `wakeword_training.md`)
+- [x] Faster TTS with Kokoro ONNX (v1.0)
+- [x] Notification center integration
 
 ---
 

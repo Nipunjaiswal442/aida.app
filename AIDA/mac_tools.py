@@ -240,3 +240,39 @@ def web_search(query: str) -> str:
         return "I couldn't find a quick answer for that. Try asking me something more specific."
     except:
         return "I couldn't find a quick answer for that. Try asking me something more specific."
+
+
+# ── Spotify / Music Control ────────────────────────
+
+def control_spotify(command: str) -> str:
+    """Control Spotify playback via AppleScript."""
+    valid_commands = ["play", "pause", "next track", "previous track"]
+    if command not in valid_commands:
+        return f"Unknown Spotify command: {command}"
+        
+    script = f'''
+    tell application "Spotify"
+        {command}
+    end tell
+    '''
+    try:
+        subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
+        return f"Spotify: {command} executed."
+    except Exception:
+        return "Could not control Spotify. Make sure the app is running."
+
+
+# ── Notification Center ────────────────────────────
+
+def send_notification(message: str, title: str = "AIDA") -> str:
+    """Send a native macOS notification."""
+    safe_title = title.replace('"', '\\"')
+    safe_message = message.replace('"', '\\"')
+    
+    script = f'display notification "{safe_message}" with title "{safe_title}"'
+    try:
+        subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
+        return "Notification sent."
+    except Exception:
+        return "Failed to send notification."
+
