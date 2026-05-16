@@ -1,6 +1,7 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QScrollArea, QLabel, QHBoxLayout, QScrollBar
 from PyQt6.QtCore import Qt, QTimer
 from datetime import datetime
+import html
 
 class ChatLogWidget(QWidget):
     def __init__(self):
@@ -57,18 +58,19 @@ class ChatLogWidget(QWidget):
         msg_widget.setLayout(msg_layout)
         
         time_str = datetime.now().strftime("%H:%M")
+        safe_text = html.escape(text).replace("\n", "<br>")
         
         lbl_msg = QLabel()
         lbl_msg.setWordWrap(True)
         lbl_msg.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         
         if sender == "AIDA":
-            lbl_msg.setText(f"<span style='color: #7B8DB0; font-size: 10px;'>{time_str}</span>&nbsp;&nbsp;<b>AIDA:</b> {text}")
+            lbl_msg.setText(f"<span style='color: #7B8DB0; font-size: 10px;'>{time_str}</span>&nbsp;&nbsp;<b>AIDA:</b> {safe_text}")
             lbl_msg.setStyleSheet("background-color: #0A1545; color: #00C6FF; border-radius: 8px; padding: 8px;")
             msg_layout.addWidget(lbl_msg)
             msg_layout.addStretch()
         else:
-            lbl_msg.setText(f"{text} <b>:You</b>&nbsp;&nbsp;<span style='color: #7B8DB0; font-size: 10px;'>{time_str}</span>")
+            lbl_msg.setText(f"{safe_text} <b>:You</b>&nbsp;&nbsp;<span style='color: #7B8DB0; font-size: 10px;'>{time_str}</span>")
             lbl_msg.setStyleSheet("background-color: #1A2A6C; color: #E0E8FF; border-radius: 8px; padding: 8px;")
             msg_layout.addStretch()
             msg_layout.addWidget(lbl_msg)

@@ -28,7 +28,7 @@ class ListenWorker(QThread):
             print(f"ListenWorker exception: {e}")
 
         if len(self._audio_data) > 0:
-            final_audio = np.concatenate(self._audio_data, axis=0)
+            final_audio = np.concatenate(self._audio_data, axis=0).flatten()
             self.audio_ready.emit(final_audio)
         else:
             self.audio_ready.emit(np.array([], dtype='float32'))

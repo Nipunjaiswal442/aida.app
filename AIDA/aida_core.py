@@ -10,14 +10,19 @@ import subprocess
 import base64
 import hashlib
 import datetime
+import threading
 import mac_tools
 from duckduckgo_search import DDGS
+from terminal_brain import (
+    format_recent_history,
+    is_terminal_history_request,
+    is_terminal_request,
+    run_terminal_powerhouse,
+)
 
 # ── ChromaDB Persistent Memory ─────────────────────
-import chromadb
-
-chroma_client = chromadb.PersistentClient(path=os.path.join(os.path.dirname(__file__), "memory_db"))
-memory_collection = chroma_client.get_or_create_collection(name="aida_memory")
+chroma_client = None
+memory_collection = None
 
 # ── CONFIG ──────────────────────────────────────────
 OLLAMA_URL     = "http://localhost:11434/api/chat"
@@ -25,11 +30,13 @@ OLLAMA_MODEL   = "dolphin-mistral"
 VOICE          = "en-US-JennyNeural"
 SAMPLE_RATE    = 16000
 OUTPUT_AUDIO   = "aida_response.mp3"
-MAX_TOKENS     = 300
+MAX_TOKENS     = 220
 TEMPERATURE    = 0.7
 MIN_RECORD_SEC = 1
 MAX_RECORD_SEC = 15
 USE_KOKORO     = True  # Use the blazing fast local Kokoro v1.0 TTS
+OLLAMA_TIMEOUT = 45
+CONVERSATION_HISTORY_LIMIT = 8
 
 SYSTEM_PROMPT = """
 You are AIDA (Artificially Intelligent Digital Assistant), a smart,
@@ -46,6 +53,12 @@ Your capabilities:
 - Screenshot + visual analysis via LLaVA
 - Persistent memory — you remember past conversations
 - Wake word listening — you respond when called
+- Terminal Powerhouse: you can translate ANY plain English Mac/developer
+  request into exact zsh terminal commands. You always show the command
+  first and ask permission before running. You never execute without yes.
+  You can handle: file management, process control, git, brew, pip, npm,
+  network diagnostics, disk analysis, log inspection, and anything else
+  a developer would need in terminal.
 
 Personality rules:
 - Speak naturally and concisely like a knowledgeable friend
@@ -61,38 +74,134 @@ You are AIDA. You live on this Mac. This is your home.
 # ── STATE ───────────────────────────────────────────
 whisper_model = whisper.load_model("base")
 conversation_history = []
+ollama_session = requests.Session()
+
+FAST_TOOL_REPLY_TYPES = {
+    "open_app",
+    "open_url",
+    "datetime",
+    "timer",
+    "calendar",
+    "reminder",
+    "spotify",
+    "notification",
+    "volume",
+    "lock_screen",
+    "empty_trash",
+    "disk_usage",
+    "battery",
+    "weather",
+    "screenshot",
+    "ip_address",
+    "wifi",
+    "list_files",
+}
+
+MEMORY_TRIGGER_PHRASES = [
+    "remember",
+    "what did i",
+    "what have i",
+    "last time",
+    "previously",
+    "past conversation",
+    "we talked",
+    "do you know my",
+    "did i tell you",
+]
 
 
 # ── PERSISTENT MEMORY ──────────────────────────────
 
+def get_memory_collection():
+    """Initialize Chroma memory lazily so startup and fast replies stay quick."""
+    global chroma_client, memory_collection
+    if memory_collection is None:
+        import chromadb
+
+        chroma_client = chromadb.PersistentClient(path=os.path.join(os.path.dirname(__file__), "memory_db"))
+        memory_collection = chroma_client.get_or_create_collection(name="aida_memory")
+    return memory_collection
+
 def save_to_memory(user_input, aida_response):
     """Save conversation pair to persistent memory."""
-    doc_id = hashlib.md5((user_input + str(datetime.datetime.now())).encode()).hexdigest()
-    memory_collection.add(
-        documents=[f"User: {user_input}\nAIDA: {aida_response}"],
-        ids=[doc_id],
-        metadatas=[{"timestamp": str(datetime.datetime.now())}]
-    )
+    try:
+        collection = get_memory_collection()
+        doc_id = hashlib.md5((user_input + str(datetime.datetime.now())).encode()).hexdigest()
+        collection.add(
+            documents=[f"User: {user_input}\nAIDA: {aida_response}"],
+            ids=[doc_id],
+            metadatas=[{"timestamp": str(datetime.datetime.now())}]
+        )
+    except Exception as e:
+        print(f"Memory save skipped: {e}")
+
+def save_to_memory_async(user_input, aida_response):
+    """Save memory without holding up the visible response path."""
+    threading.Thread(
+        target=save_to_memory,
+        args=(user_input, aida_response),
+        daemon=True
+    ).start()
 
 def retrieve_memory(query, n=3):
     """Retrieve relevant past conversations."""
     try:
-        results = memory_collection.query(query_texts=[query], n_results=n)
+        collection = get_memory_collection()
+        results = collection.query(query_texts=[query], n_results=n)
         if results["documents"][0]:
             return "\n".join(results["documents"][0])
     except Exception:
         pass
     return ""
 
+def should_retrieve_memory(query: str) -> bool:
+    """Only fetch memory when the prompt is likely asking for past context."""
+    text = query.lower()
+    return any(phrase in text for phrase in MEMORY_TRIGGER_PHRASES)
+
+def remember_exchange(user_input: str, reply: str) -> None:
+    """Update short chat context and persist memory in the background."""
+    conversation_history.append({"role": "user", "content": user_input})
+    conversation_history.append({"role": "assistant", "content": reply})
+    if len(conversation_history) > CONVERSATION_HISTORY_LIMIT:
+        del conversation_history[:-CONVERSATION_HISTORY_LIMIT]
+    save_to_memory_async(user_input, reply)
+
 
 # ── SPEECH-TO-TEXT ──────────────────────────────────
 
 def transcribe(audio_array: np.ndarray) -> str:
-    temp_wav = "temp_audio.wav"
+    temp_wav = "/tmp/aida_temp_audio.wav"
     scipy.io.wavfile.write(temp_wav, SAMPLE_RATE, audio_array)
     result = whisper_model.transcribe(temp_wav)
     text = result["text"].strip()
     return text
+
+def transcribe_short(duration=3):
+    """
+    Record a short clip for yes/no voice confirmation.
+    Falls back to keyboard input if transcription fails or is empty.
+    """
+    try:
+        import sounddevice as sd
+        from scipy.io.wavfile import write
+        import tempfile
+
+        print("Listening for yes/no (3s)...")
+        audio = sd.rec(int(duration * SAMPLE_RATE), samplerate=SAMPLE_RATE, channels=1, dtype="int16")
+        sd.wait()
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        write(tmp.name, SAMPLE_RATE, audio)
+        result = whisper_model.transcribe(tmp.name)
+        os.unlink(tmp.name)
+        text = result["text"].strip().lower()
+        if text:
+            print(f"   Heard: '{text}'")
+            return text
+        return input("(Voice unclear) Type y/n: ").lower().strip()
+    except Exception as e:
+        print(f"   Voice capture failed ({e}), using keyboard.")
+        return input("Type y/n: ").lower().strip()
 
 
 # ── LLM VIA OLLAMA ─────────────────────────────────
@@ -103,13 +212,16 @@ def get_llm_response(messages_list):
         "model": OLLAMA_MODEL,
         "messages": messages_list,
         "stream": False,
+        "keep_alive": "10m",
         "options": {
             "temperature": TEMPERATURE,
-            "num_predict": MAX_TOKENS
+            "num_predict": MAX_TOKENS,
+            "num_ctx": 2048
         }
     }
     try:
-        response = requests.post(OLLAMA_URL, json=payload, timeout=120)
+        response = ollama_session.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
+        response.raise_for_status()
         data = response.json()
         reply = data["message"]["content"].strip()
     except Exception as e:
@@ -359,10 +471,10 @@ def detect_tool(text: str) -> tuple:
     # ── Terminal command ──
     elif any(kw in text_lower for kw in ["run command", "execute", "terminal",
                                           "run in terminal", "shell"]):
-        cmd = re.sub(r'(run command|execute|terminal|run in terminal|shell)', '', text_lower).strip()
-        if cmd:
-            output = run_terminal_command(cmd)
-            return ("terminal", output)
+        return (
+            "terminal_pending",
+            "Terminal commands require explicit confirmation before anything runs.",
+        )
 
     # ── IP address ──
     elif any(kw in text_lower for kw in ["ip address", "my ip", "network address"]):
@@ -389,14 +501,31 @@ def ask_aida(user_text: str) -> str:
     """Process user input through tool detection + Ollama LLM. Returns reply string."""
     global conversation_history
 
-    # Retrieve relevant memory context
-    memory_context = retrieve_memory(user_text)
-    memory_prefix = f"\n\nRelevant past context:\n{memory_context}\n\n" if memory_context else ""
+    if is_terminal_history_request(user_text):
+        reply = format_recent_history()
+        remember_exchange(user_text, reply)
+        return reply
 
-    system_prompt_dict = {"role": "system", "content": SYSTEM_PROMPT + memory_prefix}
+    if is_terminal_request(user_text):
+        return run_terminal_powerhouse(
+            user_request=user_text,
+            speak_fn=speak,
+            get_voice_input_fn=transcribe_short,
+        )
 
     # Detect and execute tools
     tool_name, tool_result = detect_tool(user_text)
+
+    if tool_name in FAST_TOOL_REPLY_TYPES and tool_result:
+        reply = tool_result
+        remember_exchange(user_text, reply)
+        return reply
+
+    # Retrieve memory only for requests that need past context.
+    memory_context = retrieve_memory(user_text) if should_retrieve_memory(user_text) else ""
+    memory_prefix = f"\n\nRelevant past context:\n{memory_context}\n\n" if memory_context else ""
+
+    system_prompt_dict = {"role": "system", "content": SYSTEM_PROMPT + memory_prefix}
 
     if tool_name and tool_result:
         enriched_user_text = f"{user_text}\n\n[Tool result: {tool_result}]"
@@ -405,20 +534,37 @@ def ask_aida(user_text: str) -> str:
         conversation_history.append({"role": "user", "content": user_text})
 
     # Build full message list
-    messages = [system_prompt_dict] + conversation_history
+    messages = [system_prompt_dict] + conversation_history[-CONVERSATION_HISTORY_LIMIT:]
 
     # Get reply from Ollama
     reply = get_llm_response(messages)
 
     conversation_history.append({"role": "assistant", "content": reply})
+    if len(conversation_history) > CONVERSATION_HISTORY_LIMIT:
+        del conversation_history[:-CONVERSATION_HISTORY_LIMIT]
 
-    # Save to persistent memory
-    save_to_memory(user_text, reply)
+    # Save to persistent memory without delaying the visible response.
+    save_to_memory_async(user_text, reply)
 
     return reply
 
 
 # ── TTS ─────────────────────────────────────────────
+
+# Initialize Kokoro globally so it doesn't reload the 80MB model on every response
+k_model = None
+if USE_KOKORO:
+    try:
+        from kokoro_onnx import Kokoro
+        # Use Kokoro v1.0 models downloaded directly
+        # Determine the absolute path to the model files in the AIDA directory
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        onnx_path = os.path.join(base_dir, "kokoro-v1.0.onnx")
+        bin_path = os.path.join(base_dir, "voices-v1.0.bin")
+        k_model = Kokoro(onnx_path, bin_path)
+    except Exception as e:
+        print(f"Failed to initialize Kokoro globally: {e}")
+        k_model = None
 
 async def speak_async(text: str) -> None:
     """TTS via edge-tts (async)."""
@@ -429,16 +575,15 @@ async def speak_async(text: str) -> None:
 
 async def speak(text: str) -> None:
     """TTS with optional Kokoro fallback."""
-    if USE_KOKORO:
+    if USE_KOKORO and k_model is not None:
         try:
-            from kokoro_onnx import Kokoro
             import soundfile as sf
-            # Use Kokoro v1.0 models downloaded directly
-            k = Kokoro("kokoro-v1.0.onnx", "voices-v1.0.bin")
-            samples, sample_rate = k.create(text, voice="af_sarah", speed=1.0, lang="en-us")
-            sf.write("/tmp/aida_kokoro.wav", samples, sample_rate)
-            subprocess.run(["afplay", "/tmp/aida_kokoro.wav"])
+            samples, sample_rate = k_model.create(text, voice="af_sarah", speed=1.0, lang="en-us")
+            temp_path = "/tmp/aida_kokoro.wav"
+            sf.write(temp_path, samples, sample_rate)
+            subprocess.run(["afplay", temp_path])
             return
         except Exception as e:
             print(f"Kokoro failed, falling back to edge-tts: {e}")
+
     await speak_async(text)

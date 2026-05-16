@@ -80,6 +80,7 @@ pydantic-settings==2.14.1
 pydantic_core==2.46.3
 Pygments==2.20.0
 pyparsing==3.3.2
+pyperclip==1.11.0
 PyPika==0.51.1
 pyproject_hooks==1.2.0
 PyQt6==6.11.0

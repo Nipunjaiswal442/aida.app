@@ -1,5 +1,11 @@
-from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QApplication, QLineEdit
+from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QApplication, QLineEdit, QMessageBox
 import mac_tools
+from terminal_brain import (
+    format_recent_history,
+    is_terminal_history_request,
+    is_terminal_request,
+    log_command,
+)
 from workers.tools_worker import TimerAlertWorker
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QKeyEvent
@@ -13,6 +19,7 @@ from workers.listen_worker import ListenWorker
 from workers.transcribe_worker import TranscribeWorker
 from workers.llm_worker import LLMWorker
 from workers.speak_worker import SpeakWorker
+from workers.terminal_worker import TerminalCommandWorker, TerminalExecuteWorker
 from workers.wakeword_worker import WakeWordWorker
 
 class TalkButton(QPushButton):
@@ -161,6 +168,10 @@ class MainWindow(QMainWindow):
         self.speak_worker = None
         self.timer_alert_worker = None
         self.wakeword_worker = None
+        self.terminal_command_worker = None
+        self.terminal_execute_worker = None
+        self._pending_terminal_request = None
+        self._pending_terminal_command = None
 
         mac_tools.register_timer_callback(self.on_timer_alert)
 
@@ -279,11 +290,7 @@ class MainWindow(QMainWindow):
         self.text_input.clear()
         self.chat_log.add_message("User", text)
         self.set_state("PROCESSING")
-        
-        self.llm_worker = LLMWorker(text)
-        self.llm_worker.reply_ready.connect(self.on_reply_ready)
-        self.llm_worker.error.connect(self.on_worker_error)
-        self.llm_worker.start()
+        self.dispatch_user_text(text)
 
     def on_text_ready(self, text):
         if not text:
@@ -292,10 +299,127 @@ class MainWindow(QMainWindow):
             return
             
         self.chat_log.add_message("User", text)
+        self.dispatch_user_text(text)
+
+    def dispatch_user_text(self, text):
+        """Route user text to fast local handlers, terminal flow, or the LLM."""
+        if is_terminal_history_request(text):
+            self.on_reply_ready(format_recent_history())
+            return
+
+        if is_terminal_request(text):
+            self.start_terminal_powerhouse(text)
+            return
+
         self.llm_worker = LLMWorker(text)
         self.llm_worker.reply_ready.connect(self.on_reply_ready)
         self.llm_worker.error.connect(self.on_worker_error)
         self.llm_worker.start()
+
+    def start_terminal_powerhouse(self, text):
+        self._pending_terminal_request = text
+        self._pending_terminal_command = None
+        self.chat_log.add_message("AIDA", "Generating the terminal command...")
+
+        self.terminal_command_worker = TerminalCommandWorker(text)
+        self.terminal_command_worker.command_ready.connect(self.on_terminal_command_ready)
+        self.terminal_command_worker.blocked.connect(self.on_terminal_blocked)
+        self.terminal_command_worker.error.connect(self.on_worker_error)
+        self.terminal_command_worker.start()
+
+    def on_terminal_command_ready(self, command, copied):
+        self._pending_terminal_command = command
+        clipboard_note = "\n\nCopied to clipboard." if copied else ""
+        self.chat_log.add_message(
+            "AIDA",
+            f"Generated command:\n{command}\n\nShould I run this?{clipboard_note}"
+        )
+
+        self.set_state("SPEAKING")
+        spoken_prompt = f"Here is the command I'll run: {command}. Should I run this?"
+        self.speak_worker = SpeakWorker(spoken_prompt)
+        self.speak_worker.speak_done.connect(self.on_terminal_prompt_spoken)
+        self.speak_worker.error.connect(self.on_terminal_prompt_spoken)
+        self.speak_worker.start()
+
+    def on_terminal_prompt_spoken(self, *args):
+        command = self._pending_terminal_command
+        if not command:
+            self.set_state("IDLE")
+            return
+
+        self.set_state("PROCESSING")
+        confirmed = self.gui_confirm_command(command) == "yes"
+        if not confirmed:
+            request = self._pending_terminal_request or ""
+            log_command(request, command, output="", confirmed=False)
+            self._pending_terminal_request = None
+            self._pending_terminal_command = None
+            self.chat_log.add_message("AIDA", "Got it. Command cancelled.")
+            self.set_state("SPEAKING")
+            self.speak_worker = SpeakWorker("Got it. Command cancelled.")
+            self.speak_worker.speak_done.connect(self.on_speak_done)
+            self.speak_worker.error.connect(self.on_worker_error)
+            self.speak_worker.start()
+            return
+
+        self.chat_log.add_message("AIDA", "Running it now.")
+        self.terminal_execute_worker = TerminalExecuteWorker(
+            self._pending_terminal_request or "",
+            command,
+        )
+        self.terminal_execute_worker.execution_done.connect(self.on_terminal_execution_done)
+        self.terminal_execute_worker.error.connect(self.on_worker_error)
+        self.terminal_execute_worker.start()
+
+    def on_terminal_execution_done(self, full_response, spoken_summary):
+        self._pending_terminal_request = None
+        self._pending_terminal_command = None
+        self.chat_log.add_message("AIDA", full_response)
+        self.set_state("SPEAKING")
+        self.speak_worker = SpeakWorker(spoken_summary)
+        self.speak_worker.speak_done.connect(self.on_speak_done)
+        self.speak_worker.error.connect(self.on_worker_error)
+        self.speak_worker.start()
+
+    def on_terminal_blocked(self, message):
+        self._pending_terminal_request = None
+        self._pending_terminal_command = None
+        self.chat_log.add_message("AIDA", message)
+        self.set_state("SPEAKING")
+        self.speak_worker = SpeakWorker(message)
+        self.speak_worker.speak_done.connect(self.on_speak_done)
+        self.speak_worker.error.connect(self.on_worker_error)
+        self.speak_worker.start()
+
+    def gui_confirm_command(self, command):
+        """Show a GUI dialog asking user to confirm a terminal command."""
+        msg = QMessageBox(self)
+        msg.setWindowTitle("AIDA - Terminal Confirmation")
+        msg.setText("Run this command?")
+        msg.setInformativeText(f"<code>{command}</code>")
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg.setDefaultButton(QMessageBox.StandardButton.No)
+        msg.setStyleSheet("""
+            QMessageBox {
+                background-color: #0a0f1e;
+                color: #00d4ff;
+                font-family: 'SF Mono', monospace;
+            }
+            QPushButton {
+                background-color: #0a1628;
+                color: #00d4ff;
+                border: 1px solid #00d4ff;
+                padding: 6px 20px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #00d4ff;
+                color: #0a0f1e;
+            }
+        """)
+        result = msg.exec()
+        return "yes" if result == QMessageBox.StandardButton.Yes else "no"
 
     def on_reply_ready(self, reply):
         self.chat_log.add_message("AIDA", reply)

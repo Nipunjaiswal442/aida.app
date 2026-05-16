@@ -10,3 +10,4 @@ aida_response.mp3
 .DS_Store
 .cache/
 memory_db/
+terminal_history.json
