@@ -11,8 +11,8 @@ import base64
 import hashlib
 import datetime
 import threading
+import json
 import mac_tools
-from duckduckgo_search import DDGS
 from terminal_brain import (
     format_recent_history,
     is_terminal_history_request,
@@ -59,6 +59,8 @@ Your capabilities:
   You can handle: file management, process control, git, brew, pip, npm,
   network diagnostics, disk analysis, log inspection, and anything else
   a developer would need in terminal.
+- Current Data: for live or recent facts, use safe local terminal snapshots
+  and DuckDuckGo results. Answer from fetched context only; do not guess.
 
 Personality rules:
 - Speak naturally and concisely like a knowledgeable friend
@@ -116,6 +118,7 @@ DATETIME_PATTERNS = [
     r"\bwhat(?:'s| is)\s+the\s+time\b",
     r"\bwhat(?:'s| is)\s+the\s+(date|day)\b",
     r"\bwhat(?:'s| is)\s+today'?s\s+(date|day)\b",
+    r"\bwhat(?:'s| is)\s+today\b",
     r"\bwhat\s+(date|day)\s+is\s+it\b",
     r"\bwhat\s+is\s+the\s+date\s+today\b",
     r"\bwhat\s+time\s+now\b",
@@ -124,6 +127,85 @@ DATETIME_PATTERNS = [
     r"\btoday'?s\s+(date|day)\b",
     r"\b(tell|show|give)\s+me\s+(the\s+)?(current\s+|today'?s\s+)?(time|date|day)\b",
     r"^\s*(time|date|day)\s*$",
+]
+
+CURRENT_DATA_TRIGGERS = [
+    "latest",
+    "current",
+    "right now",
+    "live",
+    "recent",
+    "breaking",
+    "news",
+    "today",
+    "this week",
+    "this month",
+    "price",
+    "stock",
+    "market",
+    "score",
+    "weather",
+    "forecast",
+    "exchange rate",
+    "currency",
+    "who is",
+    "what is",
+    "look up",
+    "search for",
+    "find information",
+    "tell me about",
+]
+
+DUCK_CURRENT_DATA_TRIGGERS = [
+    "latest",
+    "live",
+    "recent",
+    "breaking",
+    "news",
+    "price",
+    "stock",
+    "market",
+    "score",
+    "weather",
+    "forecast",
+    "exchange rate",
+    "currency",
+    "who is",
+    "what is",
+    "look up",
+    "search for",
+    "find information",
+    "tell me about",
+]
+
+LOCAL_CURRENT_DATA_KEYWORDS = [
+    "battery",
+    "charging",
+    "disk",
+    "storage",
+    "space",
+    "cpu",
+    "memory",
+    "ram",
+    "process",
+    "uptime",
+    "system",
+    "mac",
+    "os",
+    "ip",
+    "wifi",
+    "wi-fi",
+    "network",
+]
+
+CURRENT_DATA_EXCLUSIONS = [
+    "calendar",
+    "schedule",
+    "appointment",
+    "events today",
+    "remind me",
+    "set reminder",
+    "timer",
 ]
 
 
@@ -180,6 +262,15 @@ def is_datetime_request(text: str) -> bool:
     """Detect date/time questions that must be answered from the local clock."""
     text_lower = text.lower().strip()
     return any(re.search(pattern, text_lower) for pattern in DATETIME_PATTERNS)
+
+def is_current_data_request(text: str) -> bool:
+    """Detect requests that need live/local data instead of model memory."""
+    text_lower = text.lower().strip()
+    if is_datetime_request(text_lower):
+        return False
+    if any(exclusion in text_lower for exclusion in CURRENT_DATA_EXCLUSIONS):
+        return False
+    return any(trigger in text_lower for trigger in CURRENT_DATA_TRIGGERS)
 
 def remember_exchange(user_input: str, reply: str) -> None:
     """Update short chat context and persist memory in the background."""
@@ -253,16 +344,270 @@ def get_llm_response(messages_list):
 
 # ── WEB SEARCH ─────────────────────────────────────
 
-def web_search(query, max_results=3):
+def web_search(query, max_results=3, prefer_news=False):
     """Search the web using DuckDuckGo (no API key needed)."""
-    try:
-        with DDGS() as ddgs:
+    search_result = duckduckgo_search_subprocess(query, max_results=max_results, prefer_news=prefer_news)
+    if search_result:
+        return search_result
+    return duckduckgo_instant_answer(query)
+
+def format_duck_results(results):
+    if not results:
+        return ""
+
+    formatted = []
+    for result in results:
+        title = result.get("title") or result.get("Heading") or "Untitled"
+        body = result.get("body") or result.get("Text") or result.get("AbstractText") or ""
+        href = result.get("href") or result.get("url") or result.get("FirstURL") or result.get("AbstractURL") or ""
+        source = result.get("source") or result.get("AbstractSource") or ""
+        date = result.get("date", "")
+        meta = " | ".join(part for part in [source, date, href] if part)
+        formatted.append(f"- {title}: {body}\n  Source: {meta}".strip())
+    return "\n".join(formatted)
+
+def duckduckgo_search_subprocess(query, max_results=3, prefer_news=False):
+    """Run duckduckgo_search out-of-process so package crashes cannot take down AIDA."""
+    script = r"""
+import json
+import sys
+import warnings
+
+warnings.filterwarnings("ignore")
+
+try:
+    from ddgs import DDGS
+except ImportError:
+    from duckduckgo_search import DDGS
+
+query = sys.argv[1]
+max_results = int(sys.argv[2])
+prefer_news = sys.argv[3] == "1"
+results = []
+errors = []
+
+with DDGS() as ddgs:
+    if prefer_news:
+        try:
+            results = list(ddgs.news(query, max_results=max_results))
+        except Exception as e:
+            errors.append(str(e))
+    if not results:
+        try:
             results = list(ddgs.text(query, max_results=max_results))
-        if not results:
-            return "No results found."
-        return "\n".join([f"• {r['title']}: {r['body']}" for r in results])
+        except Exception as e:
+            errors.append(str(e))
+    if not results and not prefer_news:
+        try:
+            results = list(ddgs.news(query, max_results=max_results))
+        except Exception as e:
+            errors.append(str(e))
+
+print(json.dumps({"results": results, "errors": errors}))
+"""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-W", "ignore", "-c", script, query, str(max_results), "1" if prefer_news else "0"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if result.returncode != 0:
+            return ""
+        payload = json.loads(result.stdout.strip())
+        return format_duck_results(payload.get("results", []))
+    except Exception as e:
+        print(f"DuckDuckGo subprocess search failed: {e}")
+        return ""
+
+def duckduckgo_instant_answer(query):
+    """Safe DuckDuckGo API fallback for facts when full search is unavailable."""
+    try:
+        response = requests.get(
+            "https://api.duckduckgo.com/",
+            params={"q": query, "format": "json", "no_html": 1, "skip_disambig": 1},
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+        results = []
+        if data.get("Answer"):
+            results.append({"title": data.get("Heading") or query, "body": data["Answer"], "url": data.get("AbstractURL", "")})
+        if data.get("AbstractText"):
+            results.append(data)
+        for topic in data.get("RelatedTopics", []):
+            if isinstance(topic, dict) and topic.get("Text"):
+                results.append(topic)
+            if len(results) >= 3:
+                break
+        return format_duck_results(results) or "No DuckDuckGo results found."
     except Exception as e:
         return f"Search failed: {e}"
+
+
+# ── CURRENT DATA FETCH ─────────────────────────────
+
+def run_safe_terminal_data(label, args, timeout=8):
+    """Run a fixed, read-only command for current-data grounding."""
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        output = result.stdout.strip() or result.stderr.strip()
+        return f"{label}: {output or 'No output.'}"
+    except subprocess.TimeoutExpired:
+        return f"{label}: command timed out."
+    except Exception as e:
+        return f"{label}: unavailable ({e})"
+
+def get_terminal_current_data(text):
+    """Fetch safe local current facts with fixed terminal commands."""
+    text_lower = text.lower()
+    commands = [("Terminal date", ["date"])]
+
+    if any(k in text_lower for k in ["battery", "charging", "power"]):
+        commands.append(("Battery", ["pmset", "-g", "batt"]))
+
+    if any(k in text_lower for k in ["disk", "storage", "space"]):
+        commands.append(("Disk", ["df", "-h", "/"]))
+
+    if any(k in text_lower for k in ["cpu", "memory", "ram", "process", "what's eating", "what is eating"]):
+        commands.extend([
+            ("Top CPU processes", ["top", "-l", "1", "-n", "5", "-o", "cpu"]),
+            ("Memory stats", ["vm_stat"]),
+        ])
+
+    if any(k in text_lower for k in ["ip", "wifi", "wi-fi", "network"]):
+        commands.extend([
+            ("Local IP", ["ipconfig", "getifaddr", "en0"]),
+            ("WiFi network", ["networksetup", "-getairportnetwork", "en0"]),
+        ])
+
+    if any(k in text_lower for k in ["system", "mac", "os", "uptime"]):
+        commands.extend([
+            ("macOS version", ["sw_vers"]),
+            ("Machine", ["uname", "-m"]),
+            ("Uptime", ["uptime"]),
+        ])
+
+    if not any(k in text_lower for k in LOCAL_CURRENT_DATA_KEYWORDS):
+        return run_safe_terminal_data("Terminal date", ["date"])
+
+    return "\n".join(run_safe_terminal_data(label, args) for label, args in commands)
+
+def extract_current_data_query(text):
+    """Build a DuckDuckGo query from a natural-language request."""
+    query = re.sub(
+        r"^(search for|search|look up|find out|find information on|find information|"
+        r"tell me about|latest|news about|google)\s+",
+        "",
+        text.strip(),
+        flags=re.IGNORECASE,
+    ).strip(" ?.")
+    return query or text.strip()
+
+def should_fetch_duck_current_data(text):
+    """Use DuckDuckGo for external/current facts, not purely local Mac snapshots."""
+    text_lower = text.lower()
+    has_duck_trigger = any(trigger in text_lower for trigger in DUCK_CURRENT_DATA_TRIGGERS)
+    has_local_trigger = any(keyword in text_lower for keyword in LOCAL_CURRENT_DATA_KEYWORDS)
+    return has_duck_trigger or not has_local_trigger
+
+def fetch_current_data_context(user_text):
+    """Fetch current context from safe terminal commands and DuckDuckGo."""
+    fetched_at = mac_tools.get_datetime()
+    terminal_context = get_terminal_current_data(user_text)
+    query = extract_current_data_query(user_text)
+    prefer_news = any(trigger in user_text.lower() for trigger in ["latest", "news", "breaking", "recent"])
+    duck_context = (
+        web_search(query, max_results=5, prefer_news=prefer_news)
+        if should_fetch_duck_current_data(user_text)
+        else "DuckDuckGo not needed for this local Mac data request."
+    )
+
+    return (
+        f"Fetched at: {fetched_at}\n\n"
+        f"Safe terminal snapshot:\n{terminal_context}\n\n"
+        f"DuckDuckGo query: {query}\n"
+        f"DuckDuckGo results:\n{duck_context}"
+    )
+
+def fallback_current_data_answer(context):
+    """Deterministic answer if the local LLM refuses fetched current data."""
+    fetched_at = ""
+    terminal_context = ""
+    duck_context = ""
+
+    if "Fetched at:" in context:
+        fetched_at = context.split("\n\n", 1)[0].replace("Fetched at: ", "").strip()
+    if "Safe terminal snapshot:\n" in context and "\n\nDuckDuckGo query:" in context:
+        terminal_context = context.split("Safe terminal snapshot:\n", 1)[1].split("\n\nDuckDuckGo query:", 1)[0].strip()
+    if "DuckDuckGo results:\n" in context:
+        duck_context = context.split("DuckDuckGo results:\n", 1)[1].strip()
+
+    if duck_context.startswith(("Search failed", "No results")):
+        return (
+            f"I couldn't fetch DuckDuckGo results right now. {duck_context}\n\n"
+            f"Terminal snapshot at {fetched_at}:\n{terminal_context}"
+        ).strip()
+
+    if duck_context.startswith("- "):
+        items = re.split(r"\n(?=- )", duck_context)
+        top_items = []
+        for item in items[:3]:
+            title_body = item[2:].split("\n  Source:", 1)[0].strip()
+            source = item.split("\n  Source:", 1)[1].strip() if "\n  Source:" in item else ""
+            top_items.append(f"- {title_body} ({source})" if source else f"- {title_body}")
+        return f"Fetched current DuckDuckGo results at {fetched_at}:\n" + "\n".join(top_items)
+
+    if terminal_context:
+        return f"Fetched current terminal data at {fetched_at}:\n{terminal_context}"
+
+    return "I couldn't verify current data right now."
+
+def answer_current_data(user_text, context):
+    """Answer a current-data question using only fetched terminal/Duck context."""
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are AIDA. Answer the user's live/current-data question using "
+                "only the fetched context below. If the context does not contain "
+                "the answer, say you could not verify it right now. Do not invent "
+                "command output, dates, prices, scores, names, or citations. Keep it concise."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"User question: {user_text}\n\nFetched context:\n{context}",
+        },
+    ]
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": messages,
+        "stream": False,
+        "keep_alive": "10m",
+        "options": {
+            "temperature": 0.2,
+            "num_predict": 260,
+            "num_ctx": 3072,
+        },
+    }
+    try:
+        response = ollama_session.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
+        response.raise_for_status()
+        reply = response.json()["message"]["content"].strip()
+        refusal_markers = [
+            "could not verify",
+            "couldn't verify",
+            "cannot verify",
+            "no recent search results",
+            "could not find",
+            "couldn't find",
+        ]
+        if any(marker in reply.lower() for marker in refusal_markers) and "DuckDuckGo results:\n- " in context:
+            return fallback_current_data_answer(context)
+        return reply
+    except Exception:
+        return fallback_current_data_answer(context)
 
 
 # ── MAC TOOLS (additional) ─────────────────────────
@@ -529,6 +874,12 @@ def ask_aida(user_text: str) -> str:
 
     if is_terminal_history_request(user_text):
         reply = format_recent_history()
+        remember_exchange(user_text, reply)
+        return reply
+
+    if is_current_data_request(user_text):
+        context = fetch_current_data_context(user_text)
+        reply = answer_current_data(user_text, context)
         remember_exchange(user_text, reply)
         return reply
 

@@ -31,3 +31,15 @@ Safety rules hardcoded into AIDA:
 - Automatically copies command to clipboard
 - Logs every command to `terminal_history.json`
 - Permanently blocks: `rm -rf /`, disk wipe, fork bombs, `chmod 777 /`
+
+## Current Data
+
+AIDA answers live questions by fetching fresh context first:
+- Safe read-only terminal snapshots for local Mac facts like date, uptime, OS, disk, battery, CPU, memory, IP, and WiFi
+- DuckDuckGo results for external facts like latest news, current prices, scores, people, companies, weather, and web lookups
+
+Examples:
+- "What's the latest AI news?"
+- "What's Apple's stock price today?"
+- "Current disk space on my Mac"
+- "Who is the CEO of OpenAI right now?"

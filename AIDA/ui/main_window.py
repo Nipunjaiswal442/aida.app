@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QApplication, QLineEdit, QMessageBox
 import mac_tools
-from aida_core import is_datetime_request
+from aida_core import is_current_data_request, is_datetime_request
 from terminal_brain import (
     format_recent_history,
     is_terminal_history_request,
@@ -310,6 +310,13 @@ class MainWindow(QMainWindow):
 
         if is_terminal_history_request(text):
             self.on_reply_ready(format_recent_history())
+            return
+
+        if is_current_data_request(text):
+            self.llm_worker = LLMWorker(text)
+            self.llm_worker.reply_ready.connect(self.on_reply_ready)
+            self.llm_worker.error.connect(self.on_worker_error)
+            self.llm_worker.start()
             return
 
         if is_terminal_request(text):
