@@ -1,45 +1,38 @@
-# AIDA
+# AIDA — application source
 
-AIDA is a local macOS voice and text assistant powered by Ollama.
+This directory holds the AIDA desktop app: a local-first, voice-driven macOS
+assistant built on Ollama, Whisper, Kokoro and PyQt6.
 
-## Example Commands
+**Setup, usage, configuration and troubleshooting live in the [root README](../README.md).**
+This file is only a map of the source so the two documents cannot drift apart.
 
-## Terminal Powerhouse
+## Entry point
 
-AIDA translates plain English into terminal commands - always showing
-the command first and asking permission before executing.
+```bash
+source venv/bin/activate
+python3 main.py
+```
 
-| You say | AIDA generates and runs |
+`main.py` patches the Homebrew paths onto `PATH` (so `ffmpeg` resolves when launched
+from Automator) and opens `ui/main_window.py`.
+
+## Modules
+
+| File | Responsibility |
 |---|---|
-| "What's eating my CPU?" | `top -l 1 -n 10 -o cpu` |
-| "How much disk space do I have?" | `df -h /` |
-| "Find all files larger than 500MB" | `find ~ -size +500M -type f` |
-| "Kill whatever is running on port 3000" | `kill $(lsof -t -i:3000)` |
-| "Show me my git log for the last 10 commits" | `git log --oneline -10` |
-| "Install httpie with brew" | `brew install httpie` |
-| "Check if Node is installed" | `node --version` |
-| "Compress my Desktop folder" | `zip -r Desktop_backup.zip ~/Desktop` |
-| "Show all environment variables" | `env | sort` |
-| "What's my public IP?" | `curl -s ifconfig.me` |
-| "Show open network ports" | `sudo lsof -iTCP -sTCP:LISTEN -n -P` |
-| "Clean up node_modules in current folder" | `find . -name 'node_modules' -type d -prune -exec rm -rf '{}' +` |
-| "Show the last 100 lines of system log" | `log show --last 1h --style compact \| tail -100` |
+| `main.py` | Boots `QApplication`, shows the main window, triggers the startup greeting |
+| `aida_core.py` | Intent routing, Ollama calls, Whisper STT, Kokoro/edge-tts TTS, ChromaDB memory, DuckDuckGo search, LLaVA vision, file reading |
+| `terminal_brain.py` | English → `zsh` translation, blacklist, confirm-before-run, clipboard copy, `terminal_history.json` logging |
+| `mac_tools.py` | AppleScript and `subprocess` tools — apps, volume, battery, disk, calendar, reminders, Spotify, notifications, screenshots |
+| `ui/` | `main_window.py`, plus the orb, waveform, HUD status and chat log widgets |
+| `workers/` | `QThread` workers so audio, transcription, generation, speech and shell work never block the UI |
 
-Safety rules hardcoded into AIDA:
-- Always shows command before running
-- Always asks yes/no confirmation
-- Automatically copies command to clipboard
-- Logs every command to `terminal_history.json`
-- Permanently blocks: `rm -rf /`, disk wipe, fork bombs, `chmod 777 /`
+## Generated at runtime
 
-## Current Data
+`memory_db/` (ChromaDB store), `terminal_history.json` (command log) and
+`aida_response.mp3` (TTS scratch file) are created on first use and are git-ignored.
 
-AIDA answers live questions by fetching fresh context first:
-- Safe read-only terminal snapshots for local Mac facts like date, uptime, OS, disk, battery, CPU, memory, IP, and WiFi
-- DuckDuckGo results for external facts like latest news, current prices, scores, people, companies, weather, and web lookups
+## Model files
 
-Examples:
-- "What's the latest AI news?"
-- "What's Apple's stock price today?"
-- "Current disk space on my Mac"
-- "Who is the CEO of OpenAI right now?"
+`kokoro-v1.0.onnx` is committed here. Its companion `voices-v1.0.bin` is **not** — download
+it as described in the root README, or AIDA falls back to network-based `edge-tts`.
